@@ -3,25 +3,31 @@
 package runner
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
+
+	"github.com/sakthi-narayan/hotreload/internal/shellwords"
 )
 
-func createCommand(dir, execCmd string) *exec.Cmd {
-	// Parse the string into fields to bypass cmd.exe
-	// This ensures cmd.Wait() waits for the ACTUAL application to close, not just the wrapper shell!
-	parts := strings.Fields(execCmd)
+func createCommand(dir, execCmd string) (*exec.Cmd, error) {
+	// Split the string ourselves to bypass cmd.exe. This ensures cmd.Wait()
+	// waits for the ACTUAL application to close, not just the wrapper shell.
+	// Quote-aware splitting keeps arguments containing spaces intact.
+	parts, err := shellwords.Split(execCmd)
+	if err != nil {
+		return nil, err
+	}
 	if len(parts) == 0 {
-		return nil
+		return nil, fmt.Errorf("exec command is empty")
 	}
 
 	cmd := exec.Command(parts[0], parts[1:]...)
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd
+	return cmd, nil
 }
 
 func killProcess(cmd *exec.Cmd) error {
