@@ -44,6 +44,15 @@ func (b *Builder) Build(ctx context.Context, dir, buildCmd string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// A rebuild cancels the build in flight. The default cancellation only
+	// kills the shell wrapper, leaving the compiler running with the working
+	// directory open and a lock on the output binary, so kill the whole tree.
+	configureBuildCmd(cmd)
+	cmd.Cancel = func() error { return killBuildTree(cmd) }
+	// Backstop: if the tree somehow outlives the kill, stop waiting on it
+	// rather than blocking the next build forever.
+	cmd.WaitDelay = 2 * time.Second
+
 	err := cmd.Run()
 	if ctx.Err() != nil {
 		return fmt.Errorf("build canceled")
