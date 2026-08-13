@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ hotreload
+# ⚡ Hotreload
 
 ### Save the file. The server's already restarted.
 
