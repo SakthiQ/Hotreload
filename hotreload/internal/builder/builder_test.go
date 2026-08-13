@@ -59,6 +59,10 @@ func TestBuildEmptyCommand(t *testing.T) {
 
 // A rebuild triggered while an older build is still running cancels it, and
 // that cancellation must be distinguishable from a genuine failure.
+//
+// t.TempDir is load-bearing here: its cleanup fails on Windows if the
+// cancelled build left any process alive holding the directory, so this also
+// asserts that cancellation takes down the whole process tree.
 func TestBuildCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
