@@ -16,23 +16,47 @@ type Watcher struct {
 	watcher  *fsnotify.Watcher
 	debounce time.Duration
 	excludes []string
-	Trigger  chan struct{}
+	// includeExts holds lower-case extensions without the leading dot. When
+	// empty, every file that is not explicitly ignored triggers a rebuild.
+	includeExts map[string]bool
+	Trigger     chan struct{}
 }
 
-func New(logger *slog.Logger, root string, debounce time.Duration, excludes []string) (*Watcher, error) {
+func New(logger *slog.Logger, root string, debounce time.Duration, excludes, includeExts []string) (*Watcher, error) {
 	fsWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 
 	return &Watcher{
-		logger:   logger,
-		root:     root,
-		watcher:  fsWatcher,
-		debounce: debounce,
-		excludes: excludes,
-		Trigger:  make(chan struct{}, 1),
+		logger:      logger,
+		root:        root,
+		watcher:     fsWatcher,
+		debounce:    debounce,
+		excludes:    excludes,
+		includeExts: normalizeExts(includeExts),
+		Trigger:     make(chan struct{}, 1),
 	}, nil
+}
+
+// normalizeExts accepts extensions written as "go", ".go" or "*.go" and
+// returns nil when the caller asked for every file.
+func normalizeExts(exts []string) map[string]bool {
+	set := make(map[string]bool, len(exts))
+	for _, ext := range exts {
+		ext = strings.ToLower(strings.TrimSpace(ext))
+		ext = strings.TrimPrefix(ext, "*")
+		ext = strings.TrimPrefix(ext, ".")
+		if ext == "" {
+			// A bare "*" means "watch everything"; no filtering at all.
+			return nil
+		}
+		set[ext] = true
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
 }
 
 func (w *Watcher) Start() error {
@@ -52,6 +76,13 @@ func (w *Watcher) Stop() error {
 }
 
 func (w *Watcher) isExcluded(path, base string) bool {
+	// The root is always watched, whatever it happens to be called. Without
+	// this, a project rooted at a hidden or build-output directory name (say
+	// ./tmp) would match the ignore rules below and nothing would be watched.
+	if filepath.Clean(path) == filepath.Clean(w.root) {
+		return false
+	}
+
 	if strings.HasPrefix(base, ".") && base != "." && base != ".." {
 		return true
 	}
@@ -158,16 +189,16 @@ func (w *Watcher) handleEvent(event fsnotify.Event, timer *time.Timer) *time.Tim
 		return timer
 	}
 
-	base := filepath.Base(event.Name)
-	if strings.HasSuffix(base, "~") || strings.HasPrefix(base, ".") {
+	// Directory creation and removal must be tracked even for paths that do
+	// not themselves trigger a rebuild, or new packages go unwatched.
+	w.handleDirEvent(event)
+
+	if !w.shouldTrigger(event.Name) {
+		w.logger.Debug("ignoring change", slog.String("file", event.Name))
 		return timer
 	}
 
-	if ignoredExtensions[strings.ToLower(filepath.Ext(base))] {
-		return timer
-	}
-
-	w.handleFileEvent(event)
+	w.logger.Info("file changed", slog.String("file", event.Name), slog.String("op", event.Op.String()))
 
 	if timer != nil {
 		timer.Stop()
@@ -181,16 +212,45 @@ func (w *Watcher) handleEvent(event fsnotify.Event, timer *time.Timer) *time.Tim
 	})
 }
 
-// handleFileEvent watches newly created directories, removes deleted ones, and logs the change.
-func (w *Watcher) handleFileEvent(event fsnotify.Event) {
+// shouldTrigger reports whether a change to path warrants a rebuild.
+func (w *Watcher) shouldTrigger(path string) bool {
+	base := filepath.Base(path)
+	if strings.HasSuffix(base, "~") || strings.HasPrefix(base, ".") {
+		return false
+	}
+
+	ext := strings.ToLower(filepath.Ext(base))
+	if ignoredExtensions[ext] {
+		return false
+	}
+
+	if w.includeExts != nil && !w.includeExts[strings.TrimPrefix(ext, ".")] {
+		return false
+	}
+
+	// The change may be inside a directory that is watched only because it was
+	// created after startup, or that fsnotify reports on behalf of its parent.
+	if dir := filepath.Dir(path); dir != path && w.isExcluded(dir, filepath.Base(dir)) {
+		return false
+	}
+
+	return true
+}
+
+// handleDirEvent watches newly created directories and drops deleted ones.
+func (w *Watcher) handleDirEvent(event fsnotify.Event) {
 	if event.Has(fsnotify.Create) {
 		info, err := os.Stat(event.Name)
 		if err == nil && info.IsDir() {
+			if w.isExcluded(event.Name, filepath.Base(event.Name)) {
+				return
+			}
 			w.logger.Info("new directory detected, watching", slog.String("path", event.Name))
-			w.addRecursive(event.Name)
+			if err := w.addRecursive(event.Name); err != nil {
+				w.logger.Warn("failed to watch new directory", slog.String("path", event.Name), slog.Any("error", err))
+			}
 		}
 	} else if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 		_ = w.watcher.Remove(event.Name)
 	}
-	w.logger.Info("file changed", slog.String("file", event.Name), slog.String("op", event.Op.String()))
 }

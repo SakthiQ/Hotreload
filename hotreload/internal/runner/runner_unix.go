@@ -3,19 +3,25 @@
 package runner
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 )
 
-func createCommand(dir, execCmd string) *exec.Cmd {
+func createCommand(dir, execCmd string) (*exec.Cmd, error) {
+	if strings.TrimSpace(execCmd) == "" {
+		return nil, fmt.Errorf("exec command is empty")
+	}
+
 	cmd := exec.Command("sh", "-c", execCmd)
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	// Assign child process to a new process group to allow killing the entire tree later
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	return cmd
+	return cmd, nil
 }
 
 func killProcess(cmd *exec.Cmd) error {

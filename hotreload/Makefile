@@ -1,21 +1,37 @@
-.PHONY: demo clean testserver
+.PHONY: build test vet check demo testserver clean
 
-demo:
-	@echo "Building testserver..."
-	cd testserver && go mod tidy && cd ..
-	@echo "Testing hotreload phase 1..."
-	# (legacy comments removed)
-	@echo "Building hotreload binary..."
-	cd hotreload && go build -o ../hotreload.exe . && cd ..
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+
+BIN := hotreload
+SERVER := server
+ifeq ($(OS),Windows_NT)
+	BIN := hotreload.exe
+	SERVER := server.exe
+endif
+
+build:
+	go build -ldflags "$(LDFLAGS)" -o $(BIN) .
+
+test:
+	go test ./...
+
+vet:
+	go vet ./...
+
+check: vet test
+
+demo: build testserver
 	@echo "Running demo (hotreload watching testserver)..."
-	@./hotreload.exe --root ./testserver \
-		--build "go build -o server.exe ./testserver" \
-		--exec "./server.exe"
-	@echo "✅ Demo complete!"
+	./$(BIN) --root ./testserver \
+		--build "go build -o $(SERVER) ." \
+		--exec "./$(SERVER)"
 
 testserver:
-	cd testserver && go mod tidy && go build -o server .
+	cd testserver && go mod tidy && go build -o $(SERVER) .
 
 clean:
-	rm -f server testserver/server
-	rm -f server testserver/server hotreload.exe
+	rm -f $(BIN) hotreload hotreload.exe
+	rm -f testserver/server testserver/server.exe testserver/testserver.exe
+	rm -rf tmp

@@ -7,6 +7,10 @@
 # Build output directory
 tmp/
 
+# Extensionless binaries produced by the demo build on Unix
+/hotreload
+/testserver/server
+
 # Go workspace file (keep go.work if you want multi-module, remove if not)
 # go.work
 # go.work.sum

@@ -25,14 +25,17 @@ func (b *Builder) Build(ctx context.Context, dir, buildCmd string) error {
 	b.logger.Info("starting build...")
 	start := time.Now()
 
+	if strings.TrimSpace(buildCmd) == "" {
+		return fmt.Errorf("build command is empty")
+	}
+
+	// The build command runs through a shell so that pipes, redirects and `&&`
+	// work. Unlike the exec command there is no need to bypass the shell here:
+	// the build is expected to finish, and cmd.Wait blocking on the wrapper is
+	// exactly what we want.
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		if strings.HasPrefix(buildCmd, "go ") {
-			args := strings.Fields(buildCmd)
-			cmd = exec.CommandContext(ctx, args[0], args[1:]...)
-		} else {
-			cmd = exec.CommandContext(ctx, "cmd", "/c", buildCmd)
-		}
+		cmd = exec.CommandContext(ctx, "cmd", "/c", buildCmd)
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", buildCmd)
 	}
