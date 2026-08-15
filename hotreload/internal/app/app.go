@@ -40,7 +40,7 @@ type App struct {
 func New(logger *slog.Logger, cfg config.Config) (*App, error) {
 	b := builder.New(logger)
 	r := runner.New(logger, cfg.KillTimeout, cfg.SettleDelay)
-	w, err := watcher.New(logger, cfg.Root, cfg.Debounce, cfg.Exclude, cfg.IncludeExt)
+	w, err := watcher.New(logger, cfg.Root, cfg.Debounce, cfg.Exclude, cfg.IncludeExt, cfg.Eager)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (a *App) Run() error {
 			}
 			return nil
 
-		case <-a.watcher.Trigger:
+		case changedAt := <-a.watcher.Trigger:
 			a.logger.Info("file change detected, restarting...")
 			if cancelBuild != nil {
 				cancelBuild()
@@ -111,7 +111,7 @@ func (a *App) Run() error {
 			}
 			var buildCtx context.Context
 			buildCtx, cancelBuild = context.WithCancel(ctx)
-			go a.runBuild(buildCtx)
+			go a.runBuild(buildCtx, changedAt)
 
 		case ev := <-a.runner.Exited:
 			if ev.Uptime >= crashThreshold {
@@ -145,7 +145,8 @@ func (a *App) Run() error {
 			retryC = nil
 			retryTimer = nil
 			// The binary is already built; only the process needs restarting.
-			a.startProcess()
+			// This is a retry, not a reload, so it is not timed.
+			a.startProcess(time.Time{})
 		}
 	}
 }
@@ -175,8 +176,10 @@ func (a *App) handleSignals(cancel context.CancelFunc) {
 	cancel()
 }
 
-// runBuild executes the build command and, on success, starts the child process.
-func (a *App) runBuild(ctx context.Context) {
+// runBuild executes the build command and, on success, starts the child
+// process. changedAt is when the triggering file change arrived, and is zero
+// for the initial build.
+func (a *App) runBuild(ctx context.Context, changedAt time.Time) {
 	if err := a.builder.Build(ctx, a.cfg.Root, a.cfg.Build); err != nil {
 		if ctx.Err() == nil {
 			a.logger.Error("build failed", slog.Any("error", err))
@@ -186,18 +189,25 @@ func (a *App) runBuild(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	a.startProcess()
+	a.startProcess(changedAt)
 }
 
-func (a *App) startProcess() {
+// startProcess launches the built binary. When changedAt is set, the total
+// time from the user's save to the process being up is reported: the number
+// that actually matters, covering debounce, shutdown, build and startup.
+func (a *App) startProcess(changedAt time.Time) {
 	if err := a.runner.Start(a.cfg.Root, a.cfg.Exec); err != nil {
 		a.logger.Error("failed to start process", slog.Any("error", err))
+		return
+	}
+	if !changedAt.IsZero() {
+		a.logger.Info("reload complete", slog.Duration("total", time.Since(changedAt)))
 	}
 }
 
 func (a *App) triggerRebuild() {
 	select {
-	case a.watcher.Trigger <- struct{}{}:
+	case a.watcher.Trigger <- time.Time{}:
 	default:
 	}
 }

@@ -19,10 +19,17 @@ type Watcher struct {
 	// includeExts holds lower-case extensions without the leading dot. When
 	// empty, every file that is not explicitly ignored triggers a rebuild.
 	includeExts map[string]bool
-	Trigger     chan struct{}
+	// eager starts the rebuild on the first event of a burst instead of
+	// waiting out the debounce window first.
+	eager bool
+
+	// Trigger carries the time the first event of the burst arrived, so the
+	// app can report reload latency as the user experiences it: from the save,
+	// not from the end of the debounce window.
+	Trigger chan time.Time
 }
 
-func New(logger *slog.Logger, root string, debounce time.Duration, excludes, includeExts []string) (*Watcher, error) {
+func New(logger *slog.Logger, root string, debounce time.Duration, excludes, includeExts []string, eager bool) (*Watcher, error) {
 	fsWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -35,7 +42,8 @@ func New(logger *slog.Logger, root string, debounce time.Duration, excludes, inc
 		debounce:    debounce,
 		excludes:    excludes,
 		includeExts: normalizeExts(includeExts),
-		Trigger:     make(chan struct{}, 1),
+		eager:       eager,
+		Trigger:     make(chan time.Time, 1),
 	}, nil
 }
 
@@ -67,7 +75,7 @@ func (w *Watcher) Start() error {
 		return err
 	}
 
-	go w.watchLoop()
+	go w.loop(w.watcher.Events, w.watcher.Errors)
 	return nil
 }
 
@@ -147,23 +155,102 @@ func (w *Watcher) addRecursive(dir string) error {
 	})
 }
 
-func (w *Watcher) watchLoop() {
-	var timer *time.Timer
+// loop coalesces filesystem events into rebuild triggers. It takes its
+// channels as arguments rather than reading w.watcher directly so that tests
+// can drive it without a real fsnotify watcher behind it.
+func (w *Watcher) loop(events <-chan fsnotify.Event, errs <-chan error) {
+	var (
+		timer  *time.Timer
+		timerC <-chan time.Time
+		// burstStart is when the first event of the current burst arrived.
+		// Reload latency is measured from here, so the reported number
+		// includes the debounce wait the user actually sat through.
+		burstStart time.Time
+		// firedLeading records that eager mode already started this burst;
+		// pending records that changes have arrived since the last trigger and
+		// still need one.
+		firedLeading bool
+		pending      bool
+	)
+
+	stopTimer := func() {
+		if timer != nil {
+			timer.Stop()
+			timer = nil
+		}
+		timerC = nil
+	}
+
+	endBurst := func() {
+		burstStart = time.Time{}
+		firedLeading = false
+		pending = false
+	}
 
 	for {
 		select {
-		case event, ok := <-w.watcher.Events:
+		case event, ok := <-events:
 			if !ok {
+				stopTimer()
 				return
 			}
-			timer = w.handleEvent(event, timer)
 
-		case err, ok := <-w.watcher.Errors:
+			// Directory bookkeeping happens for every event, including ones
+			// that do not themselves warrant a rebuild.
+			w.handleDirEvent(event)
+
+			if !w.wantsRebuild(event) {
+				continue
+			}
+
+			w.logger.Info("file changed", slog.String("file", event.Name), slog.String("op", event.Op.String()))
+
+			if burstStart.IsZero() {
+				burstStart = time.Now()
+				firedLeading = false
+			}
+
+			if w.eager && !firedLeading {
+				// Start immediately; the timer below still runs, so a burst
+				// that continues past this point gets a second trigger and the
+				// half-written file that the first build may have read is
+				// corrected.
+				w.fire(burstStart)
+				firedLeading = true
+				pending = false
+			} else {
+				pending = true
+			}
+
+			stopTimer()
+			timer = time.NewTimer(w.debounce)
+			timerC = timer.C
+
+		case <-timerC:
+			stopTimer()
+			if pending {
+				w.fire(burstStart)
+			}
+			endBurst()
+
+		case err, ok := <-errs:
 			if !ok {
+				stopTimer()
 				return
 			}
 			w.logger.Warn("watcher error", slog.Any("error", err))
 		}
+	}
+}
+
+// fire queues a rebuild. If one is already queued, the changes are simply
+// picked up by it.
+func (w *Watcher) fire(changedAt time.Time) {
+	select {
+	case w.Trigger <- changedAt:
+		w.logger.Debug("triggering rebuild")
+	default:
+		w.logger.Debug("rebuild already queued, folding change into it")
 	}
 }
 
@@ -180,36 +267,23 @@ var ignoredExtensions = map[string]bool{
 	".swp":  true,
 }
 
-func (w *Watcher) handleEvent(event fsnotify.Event, timer *time.Timer) *time.Timer {
+// wantsRebuild reports whether an event should start a rebuild.
+func (w *Watcher) wantsRebuild(event fsnotify.Event) bool {
+	// A permission change on its own is noise on some platforms.
 	if event.Has(fsnotify.Chmod) &&
 		!event.Has(fsnotify.Write) &&
 		!event.Has(fsnotify.Create) &&
 		!event.Has(fsnotify.Remove) &&
 		!event.Has(fsnotify.Rename) {
-		return timer
+		return false
 	}
-
-	// Directory creation and removal must be tracked even for paths that do
-	// not themselves trigger a rebuild, or new packages go unwatched.
-	w.handleDirEvent(event)
 
 	if !w.shouldTrigger(event.Name) {
 		w.logger.Debug("ignoring change", slog.String("file", event.Name))
-		return timer
+		return false
 	}
 
-	w.logger.Info("file changed", slog.String("file", event.Name), slog.String("op", event.Op.String()))
-
-	if timer != nil {
-		timer.Stop()
-	}
-	return time.AfterFunc(w.debounce, func() {
-		select {
-		case w.Trigger <- struct{}{}:
-			w.logger.Debug("triggering rebuild")
-		default:
-		}
-	})
+	return true
 }
 
 // shouldTrigger reports whether a change to path warrants a rebuild.

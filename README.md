@@ -38,10 +38,13 @@ INFO file change detected, restarting...
 INFO stopping process...
 INFO build successful duration=380ms
 INFO starting process...
+INFO reload complete total=498ms
 listening on :8080
 ```
 
 No flags to remember. No terminal to switch to. No stale binary.
+
+That `total` is the number that matters: your save to the process being up, debounce and shutdown included. It's printed on every reload, so the tool's own overhead is something you can see rather than guess at.
 
 ---
 
@@ -114,15 +117,21 @@ exclude = ["testdata", "docs"]
 include_ext = ["go", "mod", "sum"]
 
 # Save-heavy editors fire a burst of events. This collapses them into
-# one rebuild.
-debounce = "200ms"
+# one rebuild. Every millisecond here is paid on every save.
+debounce = "100ms"
+
+# Start rebuilding on the first event instead of waiting the window out.
+# Faster on every save; occasionally wastes a build if your editor writes
+# files in several chunks.
+eager = false
 
 # How long a process gets to shut down before it gets killed properly.
 kill_timeout = "5s"
 
-# Pause after exit so the OS releases the listen socket — this is the
-# fix for "address already in use" on fast restarts.
-settle_delay = "500ms"
+# Pause after exit so the OS releases the listen socket. Off by default —
+# the port is normally free the moment the process dies. Raise it if you
+# ever see "address already in use" on restart.
+settle_delay = "0s"
 
 # debug, info, warn, error. Use debug to see exactly which files are
 # being watched and which changes are being ignored.
@@ -149,9 +158,10 @@ hotreload --root ./api --build "go build -o server ." --exec "./server" --log-le
 --exec <command>      command used to launch the built binary  (required)
 --exclude <dirs>      comma-separated relative paths to ignore
 --include-ext <exts>  extensions that trigger a rebuild, or "*" for all
---debounce <dur>      quiet period before rebuilding                 (200ms)
+--debounce <dur>      quiet period before rebuilding                 (100ms)
+--eager               rebuild on the first event, no debounce wait     (off)
 --kill-timeout <dur>  wait before force-killing the process             (5s)
---settle-delay <dur>  pause after exit so the OS frees the port      (500ms)
+--settle-delay <dur>  pause after exit so the OS frees the port         (0s)
 --log-level <level>   debug, info, warn or error                      (info)
 --version             print the version and exit
 ```

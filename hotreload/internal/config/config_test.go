@@ -43,6 +43,7 @@ include_ext = ["go", "html"]
 debounce = "50ms"
 kill_timeout = "3s"
 settle_delay = 100
+eager = true
 log_level = "debug"
 `)
 
@@ -63,6 +64,7 @@ log_level = "debug"
 		Debounce:    50 * time.Millisecond,
 		KillTimeout: 3 * time.Second,
 		SettleDelay: 100 * time.Millisecond,
+		Eager:       true,
 		LogLevel:    "debug",
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -103,6 +105,7 @@ func TestLoadErrors(t *testing.T) {
 		"missing equals":     `root "."`,
 		"bad duration":       `debounce = "soon"`,
 		"bad log level":      `log_level = "loud"`,
+		"bad bool":           `eager = yes`,
 		"table":              "[watch]\nroot = \".\"",
 		"unterminated array": `exclude = ["a", "b"`,
 	}
