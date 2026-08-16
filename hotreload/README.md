@@ -22,8 +22,10 @@ There is also a `Makefile` which can build, test, and run a demo of the tool.
 	build artifacts, hidden dirs) plus user‑specified excludes.
 - Only rebuild for file types you care about (`include_ext`, `go` by
 	default) so a README or log file edit does not restart the server.
-- Debounce rapid file events (200 ms by default) to avoid unnecessary
-	rebuilds.
+- Debounce rapid file events (100 ms by default) to avoid unnecessary
+	rebuilds, or skip the wait entirely with `eager`.
+- Report the total reload time from your save to the process being up,
+	so the tool's own overhead is visible rather than assumed.
 - Run a build command on change and stream stdout/stderr in real time.
 - Start/stop the server process cleanly; kill stubborn processes if
 	necessary.
@@ -97,9 +99,11 @@ hotreload version   print the version and commit
 --exclude <dirs>      comma-separated relative paths to ignore
 --include-ext <exts>  comma-separated extensions that trigger a rebuild,
                       or "*" for every file (default go,mod,sum)
---debounce <dur>      quiet period before rebuilding (default 200ms)
+--debounce <dur>      quiet period before rebuilding (default 100ms)
+--eager               rebuild on the first file event, without waiting out
+                      the debounce window (default off)
 --kill-timeout <dur>  wait before force-killing the process (default 5s)
---settle-delay <dur>  pause after exit to let the OS release the port (default 500ms)
+--settle-delay <dur>  pause after exit to let the OS release the port (default 0s)
 --log-level <level>   debug, info, warn or error (default info)
 --version             print the version and exit
 ```
@@ -121,9 +125,10 @@ exec = "./tmp/app"
 exclude = ["testdata", "docs"]
 include_ext = ["go", "mod", "sum"]
 
-debounce = "200ms"
+debounce = "100ms"
+eager = false
 kill_timeout = "5s"
-settle_delay = "500ms"
+settle_delay = "0s"
 log_level = "info"
 ```
 

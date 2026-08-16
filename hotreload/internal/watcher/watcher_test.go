@@ -19,8 +19,13 @@ func newTestWatcher(root string, excludes, includeExts []string) *Watcher {
 		debounce:    time.Millisecond,
 		excludes:    excludes,
 		includeExts: normalizeExts(includeExts),
-		Trigger:     make(chan struct{}, 1),
+		Trigger:     make(chan time.Time, 1),
 	}
+}
+
+// writeEvent is a plain content change to a watched file.
+func writeEvent(path string) fsnotify.Event {
+	return fsnotify.Event{Name: filepath.FromSlash(path), Op: fsnotify.Write}
 }
 
 func TestIsExcluded(t *testing.T) {
@@ -133,17 +138,25 @@ func TestNormalizeExts(t *testing.T) {
 	}
 }
 
+// startLoop drives the event loop with a channel the test controls, and stops
+// it when the test ends.
+func startLoop(t *testing.T, w *Watcher) chan fsnotify.Event {
+	t.Helper()
+	events := make(chan fsnotify.Event, 128)
+	errs := make(chan error)
+	go w.loop(events, errs)
+	t.Cleanup(func() { close(events) })
+	return events
+}
+
 // Many events arriving in a burst must produce a single rebuild.
 func TestDebounceCoalescesEvents(t *testing.T) {
 	w := newTestWatcher(filepath.FromSlash("/project"), nil, []string{"go"})
 	w.debounce = 60 * time.Millisecond
+	events := startLoop(t, w)
 
-	var timer *time.Timer
 	for i := 0; i < 50; i++ {
-		timer = w.handleEvent(fsnotify.Event{
-			Name: filepath.FromSlash("/project/main.go"),
-			Op:   fsnotify.Write,
-		}, timer)
+		events <- writeEvent("/project/main.go")
 	}
 
 	select {
@@ -154,30 +167,96 @@ func TestDebounceCoalescesEvents(t *testing.T) {
 
 	select {
 	case <-w.Trigger:
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("no rebuild triggered after the debounce window")
 	}
 
 	select {
 	case <-w.Trigger:
 		t.Fatal("a burst of events produced more than one rebuild")
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// In eager mode the rebuild starts on the first event rather than after the
+// debounce window, which is the whole point of the setting.
+func TestEagerFiresImmediately(t *testing.T) {
+	w := newTestWatcher(filepath.FromSlash("/project"), nil, []string{"go"})
+	w.debounce = time.Second
+	w.eager = true
+	events := startLoop(t, w)
+
+	start := time.Now()
+	events <- writeEvent("/project/main.go")
+
+	select {
+	case <-w.Trigger:
+		if elapsed := time.Since(start); elapsed >= w.debounce {
+			t.Errorf("eager mode waited %v, i.e. the full debounce window", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("eager mode did not trigger a rebuild")
+	}
+}
+
+// A single save in eager mode must not produce a second, wasted rebuild.
+func TestEagerSingleEventFiresOnce(t *testing.T) {
+	w := newTestWatcher(filepath.FromSlash("/project"), nil, []string{"go"})
+	w.debounce = 50 * time.Millisecond
+	w.eager = true
+	events := startLoop(t, w)
+
+	events <- writeEvent("/project/main.go")
+
+	select {
+	case <-w.Trigger:
+	case <-time.After(2 * time.Second):
+		t.Fatal("eager mode did not trigger a rebuild")
+	}
+
+	select {
+	case <-w.Trigger:
+		t.Error("a single event produced a second rebuild after the window")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// The trigger carries when the change arrived, so reload latency can be
+// measured from the save rather than from the end of the debounce window.
+func TestTriggerCarriesChangeTime(t *testing.T) {
+	w := newTestWatcher(filepath.FromSlash("/project"), nil, []string{"go"})
+	w.debounce = 60 * time.Millisecond
+	events := startLoop(t, w)
+
+	before := time.Now()
+	events <- writeEvent("/project/main.go")
+
+	select {
+	case changedAt := <-w.Trigger:
+		if changedAt.Before(before) {
+			t.Errorf("changedAt %v predates the event", changedAt)
+		}
+		// The timestamp must be the arrival of the change, not the moment the
+		// debounce window closed.
+		if waited := time.Since(changedAt); waited < w.debounce {
+			t.Errorf("changedAt looks like the fire time, not the change time (only %v old)", waited)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no rebuild triggered")
 	}
 }
 
 // Chmod-only events are noise on some platforms and must not rebuild.
-func TestHandleEventIgnoresChmodOnly(t *testing.T) {
+func TestIgnoresChmodOnly(t *testing.T) {
 	w := newTestWatcher(filepath.FromSlash("/project"), nil, []string{"go"})
 	w.debounce = time.Millisecond
+	events := startLoop(t, w)
 
-	w.handleEvent(fsnotify.Event{
-		Name: filepath.FromSlash("/project/main.go"),
-		Op:   fsnotify.Chmod,
-	}, nil)
+	events <- fsnotify.Event{Name: filepath.FromSlash("/project/main.go"), Op: fsnotify.Chmod}
 
 	select {
 	case <-w.Trigger:
 		t.Error("a chmod-only event triggered a rebuild")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 	}
 }

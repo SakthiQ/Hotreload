@@ -61,6 +61,7 @@ func run(args []string) error {
 		debounce    = fs.Duration("debounce", def.Debounce, "quiet period after a file event before rebuilding")
 		killTimeout = fs.Duration("kill-timeout", def.KillTimeout, "how long to wait for the process to exit before killing it")
 		settleDelay = fs.Duration("settle-delay", def.SettleDelay, "pause after the process exits, letting the OS release its port")
+		eager       = fs.Bool("eager", def.Eager, "start rebuilding on the first file event instead of waiting out the debounce window")
 		logLevel    = fs.String("log-level", def.LogLevel, "debug, info, warn or error")
 		showVersion = fs.Bool("version", false, "print the version and exit")
 	)
@@ -110,6 +111,8 @@ func run(args []string) error {
 			cfg.KillTimeout = *killTimeout
 		case "settle-delay":
 			cfg.SettleDelay = *settleDelay
+		case "eager":
+			cfg.Eager = *eager
 		case "log-level":
 			cfg.LogLevel = *logLevel
 		}

@@ -48,6 +48,7 @@ type Config struct {
 	Debounce    time.Duration
 	KillTimeout time.Duration
 	SettleDelay time.Duration
+	Eager       bool
 	LogLevel    string
 }
 
@@ -55,12 +56,17 @@ type Config struct {
 // IncludeExt default keeps a documentation or log file edit from triggering a
 // rebuild; set it to "*" to watch every file, which was the behaviour before
 // extension filtering existed.
+//
+// The timings are chosen to keep reload latency low: every millisecond here is
+// paid on every single save. SettleDelay in particular defaults to zero,
+// because the port is normally free the moment the process dies — it exists
+// for the setups where that is not true.
 func Default() Config {
 	return Config{
 		IncludeExt:  []string{"go", "mod", "sum"},
-		Debounce:    200 * time.Millisecond,
+		Debounce:    100 * time.Millisecond,
 		KillTimeout: 5 * time.Second,
-		SettleDelay: 500 * time.Millisecond,
+		SettleDelay: 0,
 		LogLevel:    "info",
 	}
 }
@@ -167,6 +173,8 @@ func applyLine(cfg *Config, raw string) error {
 		return assignDuration(&cfg.KillTimeout, key, value)
 	case "settle_delay":
 		return assignDuration(&cfg.SettleDelay, key, value)
+	case "eager":
+		return assignBool(&cfg.Eager, key, value)
 	default:
 		return fmt.Errorf("unknown setting %q", key)
 	}
@@ -195,6 +203,18 @@ func assignString(dst *string, key, value string) error {
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	*dst = s
+	return nil
+}
+
+func assignBool(dst *bool, key, value string) error {
+	switch strings.ToLower(strings.Trim(value, `"'`)) {
+	case "true":
+		*dst = true
+	case "false":
+		*dst = false
+	default:
+		return fmt.Errorf("%s: want true or false, got %q", key, value)
+	}
 	return nil
 }
 
@@ -303,14 +323,23 @@ exclude = ["testdata", "docs"]
 # File extensions that trigger a rebuild. Use ["*"] to watch every file.
 include_ext = ["go", "mod", "sum"]
 
-# How long to wait for the file events to stop before rebuilding.
-debounce = "200ms"
+# How long to wait for the file events to stop before rebuilding. Every
+# millisecond here is paid on every save, so keep it just long enough to
+# cover the way your editor writes files.
+debounce = "100ms"
+
+# Start rebuilding on the first file event instead of waiting out the
+# debounce window. Saves the wait on every save, at the cost of an
+# occasional wasted build when an editor writes a file in several chunks.
+eager = false
 
 # How long to wait for the child process to exit before killing it forcefully.
 kill_timeout = "5s"
 
-# Pause after the child exits, giving the OS time to release its listen socket.
-settle_delay = "500ms"
+# Pause after the child exits, giving the OS time to release its listen
+# socket. Normally unnecessary - raise it only if restarts fail with
+# "address already in use".
+settle_delay = "0s"
 
 # One of: debug, info, warn, error.
 log_level = "info"
